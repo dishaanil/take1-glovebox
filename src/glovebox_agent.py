@@ -36,6 +36,38 @@ PaymentMethod = Literal["card", "cash", "fuel_card"]
 ChangeKind = Literal["running_late", "appointment_moved", "cancelled", "issue"]
 
 
+# Trucking words STT tends to miss. Names from seed.yaml are added on top.
+TRUCKING_TERMS = [
+    "Glovebox",
+    "Love's",
+    "Pilot",
+    "Flying J",
+    "Petro",
+    "DEF",
+    "lumper",
+    "washout",
+    "reefer",
+    "scale ticket",
+    "detention",
+    "deadhead",
+]
+
+
+def stt_keyterms(books: Books | None = None) -> list[str]:
+    """Words to bias STT toward: trucking terms plus every name in the seed."""
+    books = books or load_books()
+    names = {books.driver, books.business}
+    for load in books.loads:
+        names.add(load.broker)
+        for s in load.stops.values():
+            names.add(s.facility)
+            names.add(s.city.split(",")[0])
+    names.update(e.place.split(" in ")[0] for e in books.events)
+    # Proper names only: an event place like "home in Joplin" isn't a keyterm.
+    proper = {n for n in names if n[:1].isupper() and n not in TRUCKING_TERMS}
+    return TRUCKING_TERMS + sorted(proper)
+
+
 def job_prompt(books: Books) -> str:
     load = books.load
     stops = "; ".join(
@@ -65,13 +97,15 @@ only after he says yes.
    "512.40". If he mentions several at once, log all of them first, then read
    them all back together in one reply.
 2. Read back using each tool result's readback text word for word, then ask
-   "Is that right?" and nothing else.
+   "Is that right?" and nothing else. Nothing is saved until he says yes, so
+   never say "logged", "saved" or "on the books" before that.
 3. Any clear yes ("yes", "yep", "yup", "that's right", "ten-four") means call
    confirm_records with the refs you read back. A correction is not a yes: use
    correct_expense on the same ref, read back the new readback, and ask again.
    Never log a second expense to fix the first.
-4. Stop times: call log_stop_times. When he has both times for a stop, call
-   check_detention and say its result. Only if he wants it, call
+4. Stop times: call log_stop_times. They're saved right away (he can correct
+   them by giving the time again), so don't ask "Is that right?" for them.
+   When he has both times for a stop, call check_detention and say its result. Only if he wants it, call
    create_detention_claim.
 5. "How's this load doing?" means get_load_summary; say its result.
 6. Schedule questions ("what's tomorrow look like?") mean get_schedule.
@@ -81,8 +115,11 @@ only after he says yes.
    any heads-up about the next load, then ask "Is that right?" and confirm
    with confirm_records after a yes, like expenses. Acknowledge how he feels in
    a few words if he's frustrated, but don't promise anyone will be told.
-8. When he's done, ask "Anything else?" once. If he paid cash, remind him to
-   snap the receipt when he's parked. Then say goodbye and end the call.
+8. When he's finished a task, ask "Anything else?" once. Once he says he's done
+   ("that's it", "that's all", "later", "bye"), don't ask again. If something
+   you read back is still waiting on his yes, say in a few words that it isn't
+   saved. If he paid cash, remind him to snap the receipt when he's parked. Then
+   call end_call, and say goodbye once, after it, not before.
 
 Rules:
 - Every number you say comes from a tool result. Never add, subtract or
@@ -101,8 +138,15 @@ class GloveboxAgent(Agent):
     def __init__(self, books: Books | None = None) -> None:
         self.books = books or load_books()
         super().__init__(
-            instructions=build_instructions(job_prompt(self.books)),
-            tools=[EndCallTool(ignore_on_enter=True)],
+            instructions=build_instructions(
+                job_prompt(self.books), today=self.books.now.date()
+            ),
+            tools=[
+                EndCallTool(
+                    ignore_on_enter=True,
+                    end_instructions="Say one short goodbye.",
+                )
+            ],
         )
 
     async def on_enter(self) -> None:
@@ -113,6 +157,36 @@ class GloveboxAgent(Agent):
             f"Hey {self.books.driver}, it's Glovebox, your automated bookkeeper. "
             f"You're on load {digit_words(load.number)} to {city}. What've you got?"
         )
+
+    def filler_line(self, heard: str) -> str:
+        """A short holding line while the model thinks, matched to what he said."""
+        said = heard.lower()
+        if any(
+            w in said for w in ("schedule", "tomorrow", "coming up", "next", "week")
+        ):
+            return "Let me check your schedule."
+        if any(
+            w in said for w in ("late", "moved", "pushed", "cancel", "alarm", "broke")
+        ):
+            return "Okay, one sec."
+        if any(w in said for w in ("doing", "net", "making", "profit")):
+            return "Pulling up the numbers."
+        if any(ch.isdigit() for ch in said) or "$" in said:
+            return "Got it, one sec."
+        return "One sec."
+
+    def silence_line(self, check_in: int, last: bool) -> str:
+        """What to say when he's gone quiet. Fixed text: no LLM round trip."""
+        if last:
+            return (
+                "I'll let you go. I haven't saved anything you didn't confirm. "
+                "Call back anytime."
+            )
+        if check_in == 1:
+            return f"Still there, {self.books.driver}? No rush if you're driving."
+        if self.books.has_pending():
+            return "I've still got that waiting on your yes. Want me to save it?"
+        return "You still with me?"
 
     @function_tool
     async def log_expense(
@@ -236,7 +310,10 @@ class GloveboxAgent(Agent):
             return str(err)
         logger.info("log_stop_times %s %s %s", s.kind, s.arrived, s.departed)
         ready = " Both times are in: call check_detention." if s.departed else ""
-        return f"Saved. readback: {self.books.stop_readback(s)}{ready}"
+        return (
+            "Saved now; stop times don't wait for a yes, he can correct them. "
+            f"readback: {self.books.stop_readback(s)}{ready}"
+        )
 
     @function_tool
     async def check_detention(self, context: RunContext, stop: str) -> str:
@@ -306,9 +383,10 @@ class GloveboxAgent(Agent):
         """A change or problem on his schedule. Pending until he confirms the readback.
 
         Args:
-            kind: running_late (his new ETA), appointment_moved (the shipper or
-                receiver changed the time), cancelled (a whole load), or issue
-                (anything else: breakdown, reefer alarm, road closed).
+            kind: running_late (he'll get there later than planned, for any
+                reason, including a breakdown or alarm: put the reason in note),
+                appointment_moved (the shipper or receiver changed the time),
+                cancelled (a whole load), or issue (a problem with no new time).
             load_number: The load, like "4482". Leave it out for the current load.
             stop: "pickup", "delivery", or the facility name.
             new_time: The new time as said, like "7" or "6:30 PM".
@@ -324,7 +402,12 @@ class GloveboxAgent(Agent):
         except LedgerError as err:
             return str(err)
         logger.info("report_schedule_change %s %s %s", c.ref, c.kind, c.new_time)
-        return f"ref {c.ref}, pending. readback: {c.readback()}"
+        replaced = (
+            f" This replaces {c.replaces}, which is dropped and won't be saved."
+            if c.replaces
+            else ""
+        )
+        return f"ref {c.ref}, pending.{replaced} readback: {c.readback()}"
 
     @function_tool
     async def get_load_summary(self, context: RunContext) -> str:

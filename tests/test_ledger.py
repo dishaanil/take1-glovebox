@@ -271,3 +271,38 @@ def test_issue_needs_a_note_and_reads_back():
 def test_unknown_load_is_refused():
     with pytest.raises(LedgerError, match="four four four four"):
         books().report_change("cancelled", "4444")
+
+
+def test_has_pending_covers_expenses_and_changes():
+    b = books()
+    assert not b.has_pending()
+    b.log_expense("toll", "12")
+    assert b.has_pending()
+    b.confirm(["E1"])
+    assert not b.has_pending()
+    c = b.report_change("issue", note="a low tire")
+    assert b.has_pending()
+    b.confirm([c.ref])
+    assert not b.has_pending()
+
+
+def test_issue_with_a_new_time_is_a_delay():
+    c = books().report_change(
+        "issue", "4471", "delivery", "5:00 AM", "2026-11-07", "reefer alarm"
+    )
+    assert (c.kind, c.new_time) == ("running_late", datetime(2026, 11, 7, 5, 0))
+    assert "because of reefer alarm" in c.readback()
+    assert "at risk" in c.readback()
+
+
+def test_new_report_replaces_unconfirmed_one_for_the_same_stop():
+    b = books()
+    eight = b.report_change("appointment_moved", "4482", "pickup", "8")
+    nine = b.report_change("appointment_moved", "4482", "pickup", "9")
+    assert eight.status == "discarded"
+    assert nine.replaces == eight.ref
+    with pytest.raises(LedgerError):
+        b.confirm([eight.ref])
+    b.confirm([nine.ref])
+    assert b.find_load("4482").stops["pickup"].appointment.hour == 9
+    assert not b.has_pending()

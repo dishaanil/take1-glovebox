@@ -18,17 +18,21 @@ from livekit.agents import (
     Agent,
     AgentServer,
     AgentSession,
+    AgentStateChangedEvent,
     JobContext,
+    MetricsCollectedEvent,
     STTContextOptions,
     TurnHandlingOptions,
+    UserInputTranscribedEvent,
     UserStateChangedEvent,
     cli,
     inference,
+    metrics,
     room_io,
 )
 from livekit.plugins import ai_coustics
 
-from glovebox_agent import GloveboxAgent
+from glovebox_agent import GloveboxAgent, stt_keyterms
 from models import load_models
 
 logger = logging.getLogger("agent")
@@ -41,10 +45,20 @@ AGENTS: dict[str, type[Agent]] = {
 
 AGENT_NAME = os.getenv("AGENT_NAME", "take2-agent")
 
-# Silence: after this many quiet seconds the caller counts as "away".
-SILENCE_SECONDS = 8.0
+# Endpointing: how long to wait after he stops talking before replying. Drivers
+# pause mid-number ("five twelve... forty"), so the floor is above the 0.5 s
+# default; dynamic mode learns each caller's pace within the range.
+ENDPOINTING = {"mode": "dynamic", "min_delay": 0.8, "max_delay": 4.0}
+
+# Silence: after this many quiet seconds the caller counts as "away". Ten, not
+# the starter's eight: a driver may be merging or reading a sign.
+SILENCE_SECONDS = 10.0
 # Check in this many times, then say goodbye and hang up.
 MAX_CHECK_INS = 2
+
+# Filler: if the agent is still thinking this long after he stops talking, say a
+# short canned line so the line never goes dead. One per turn.
+FILLER_DELAY = float(os.getenv("FILLER_DELAY", "1.0"))
 
 
 def pick_agent() -> Agent:
@@ -64,7 +78,12 @@ def handle_silence(session: AgentSession) -> None:
     async def check_in() -> None:
         nonlocal check_ins
         check_ins += 1
-        if check_ins <= MAX_CHECK_INS:
+        last = check_ins > MAX_CHECK_INS
+        # Agents with fixed lines (Glovebox) skip the LLM round trip.
+        silence_line = getattr(session.current_agent, "silence_line", None)
+        if silence_line:
+            await session.say(silence_line(check_ins, last=last)).wait_for_playout()
+        elif not last:
             await session.generate_reply(
                 instructions="The caller has gone quiet. In a few words, ask if they are still there."
             )
@@ -72,6 +91,7 @@ def handle_silence(session: AgentSession) -> None:
             await session.generate_reply(
                 instructions="The caller is not responding. Say a short, polite goodbye."
             )
+        if last:
             session.shutdown()
 
     @session.on("user_state_changed")
@@ -83,6 +103,85 @@ def handle_silence(session: AgentSession) -> None:
             task = asyncio.create_task(check_in())
             tasks.add(task)
             task.add_done_callback(tasks.discard)
+
+
+def handle_slow_turns(session: AgentSession) -> None:
+    """Say a short filler line when the agent thinks for longer than FILLER_DELAY.
+
+    The line comes from the agent's filler_line(transcript), matched to what the
+    caller just said. It's kept out of the chat history so the LLM never sees it.
+    """
+    heard = ""
+    pending: asyncio.Task[None] | None = None
+    filled = False
+
+    async def fill_after_delay() -> None:
+        nonlocal filled
+        await asyncio.sleep(FILLER_DELAY)
+        filler_line = getattr(session.current_agent, "filler_line", None)
+        if session.agent_state == "thinking" and not filled and filler_line:
+            filled = True
+            logger.info("filler after %.1fs: %s", FILLER_DELAY, heard)
+            session.say(filler_line(heard), add_to_chat_ctx=False)
+
+    @session.on("user_input_transcribed")
+    def _on_transcript(ev: UserInputTranscribedEvent) -> None:
+        nonlocal heard
+        if ev.is_final:
+            heard = ev.transcript
+
+    @session.on("function_tools_executed")
+    def _on_tools_executed(_ev: object) -> None:
+        # Never talk over the reply being written from a tool result: in testing a
+        # filler at that moment came just before a reply that never arrived.
+        nonlocal filled
+        filled = True
+        if pending and not pending.done():
+            pending.cancel()
+
+    @session.on("agent_state_changed")
+    def _on_agent_state(ev: AgentStateChangedEvent) -> None:
+        nonlocal pending, filled
+        if pending and not pending.done():
+            pending.cancel()
+        if ev.new_state == "listening":
+            filled = False  # his next turn gets a new filler
+        elif ev.new_state == "thinking":
+            pending = asyncio.create_task(fill_after_delay())
+
+
+def track_latency(session: AgentSession) -> list[float]:
+    """Log how long he waits for each reply: end of turn + LLM first token + TTS
+    first audio. Returns the running list so the call can be summarized at the end."""
+    turns: dict[str, dict[str, float]] = {}
+    totals: list[float] = []
+
+    @session.on("metrics_collected")
+    def _on_metrics(ev: MetricsCollectedEvent) -> None:
+        m = ev.metrics
+        sid = getattr(m, "speech_id", None)
+        if not sid:
+            return
+        t = turns.setdefault(sid, {})
+        if isinstance(m, metrics.EOUMetrics):
+            t["eou"] = m.end_of_utterance_delay
+        elif isinstance(m, metrics.LLMMetrics) and "llm" not in t:
+            t["llm"] = m.ttft  # first LLM call; tool round trips are covered by filler
+        elif isinstance(m, metrics.TTSMetrics) and "tts" not in t:
+            t["tts"] = m.ttfb
+            if "eou" in t and "llm" in t:
+                total = t["eou"] + t["llm"] + t["tts"]
+                totals.append(total)
+                logger.info(
+                    "turn latency %.2fs (end of turn %.2f + llm %.2f + tts %.2f)",
+                    total,
+                    t["eou"],
+                    t["llm"],
+                    t["tts"],
+                )
+            turns.pop(sid, None)
+
+    return totals
 
 
 server = AgentServer()
@@ -98,21 +197,7 @@ async def entrypoint(ctx: JobContext) -> None:
         stt=models.stt,
         # Bias transcription toward words it would otherwise misspell.
         stt_context_options=STTContextOptions(
-            keyterms=[
-                "Glovebox",
-                "Love's",
-                "Pilot",
-                "Flying J",
-                "Petro",
-                "DEF",
-                "lumper",
-                "washout",
-                "scale ticket",
-                "detention",
-                "Harlan Point",
-                "Southmere",
-                "Bluegate",
-            ],
+            keyterms=stt_keyterms(),
             keyterm_detection={"enabled": True},
         ),
         # Brain: the LLM
@@ -126,15 +211,26 @@ async def entrypoint(ctx: JobContext) -> None:
             turn_detection=inference.TurnDetector(),
             # Start drafting a reply before the turn is confirmed. Cuts latency.
             preemptive_generation={"enabled": True},
+            endpointing=ENDPOINTING,
         ),
         user_away_timeout=SILENCE_SECONDS,
     )
 
     handle_silence(session)
+    handle_slow_turns(session)
+    latencies = track_latency(session)
 
     async def log_usage() -> None:
         # Shows model usage per call so you can see what you're spending.
         logger.info("session usage: %s", session.usage)
+        if latencies:
+            ordered = sorted(latencies)
+            logger.info(
+                "call latency over %d turns: median %.2fs, worst %.2fs",
+                len(ordered),
+                ordered[len(ordered) // 2],
+                ordered[-1],
+            )
 
     ctx.add_shutdown_callback(log_usage)
 

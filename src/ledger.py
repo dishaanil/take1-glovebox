@@ -6,6 +6,7 @@ pending, and returns the exact sentence the agent reads back. A record counts
 only after the caller says yes to that readback.
 """
 
+import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -327,6 +328,7 @@ class Change:
     new_time: datetime | None = None
     status: str = "pending"  # pending | confirmed | discarded
     readback_text: str = ""
+    replaces: str | None = None  # an unconfirmed report this one supersedes
 
     def readback(self) -> str:
         return self.readback_text
@@ -446,6 +448,10 @@ class Books:
 
     def pending(self) -> list[Expense]:
         return [e for e in self.expenses if e.status == "pending"]
+
+    def has_pending(self) -> bool:
+        """Anything read back but not yet confirmed: expenses or schedule changes."""
+        return bool(self.pending()) or any(c.status == "pending" for c in self.changes)
 
     # -- stops and detention --
 
@@ -657,6 +663,10 @@ class Books:
     ) -> Change:
         ref = f"S{len(self.changes) + 1}"
         note = note.strip()
+        if kind == "issue" and new_time:
+            # "Reefer alarm, I won't make it till five": a problem that comes with a
+            # new time is a delay, with the problem as the reason.
+            kind = "running_late"
         reason = f", because of {note}" if note else ""
         if kind == "issue":
             load = self.find_load(load_number) if load_number else None
@@ -701,6 +711,16 @@ class Books:
                 )
         else:
             raise LedgerError("Is that a delay, a moved appointment, or a problem?")
+        # He changed his mind before saying yes: the new report replaces the old one.
+        for old in self.changes:
+            if (
+                old.status == "pending"
+                and old.load_number == change.load_number
+                and old.stop_kind == change.stop_kind
+                and old.kind == change.kind
+            ):
+                old.status = "discarded"
+                change.replaces = old.ref
         self.changes.append(change)
         return change
 
@@ -774,7 +794,10 @@ def _clock(value: str | int) -> timedelta:
 
 def load_books(now: datetime | None = None, path: Path = SEED_FILE) -> Books:
     """Build a fresh ledger from seed.yaml. Days in the file count from today."""
-    now = (now or datetime.now()).replace(second=0, microsecond=0)
+    # GLOVEBOX_NOW (like 2026-11-06T17:30) pins the clock for simulations.
+    pinned = os.getenv("GLOVEBOX_NOW")
+    now = now or (datetime.fromisoformat(pinned) if pinned else datetime.now())
+    now = now.replace(second=0, microsecond=0)
     today = now.replace(hour=0, minute=0)
     seed = yaml.safe_load(path.read_text())
 
