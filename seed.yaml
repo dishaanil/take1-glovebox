@@ -1,81 +1,131 @@
 # Glovebox demo data. Every call starts fresh from this file.
 #
-# Edit freely, then restart the agent (or `lk agent debugger restart`).
+# Edit freely, then restart the agent.
 #   day:  0 = today, 1 = tomorrow, 2 = the day after, ...
 #   time: 24-hour clock in quotes, like "07:00" or "16:30"
-# All businesses and people are fictional.
+#
+# Each driver is reached only from their own phones. A call gets that driver's
+# loads and schedule and nothing else: Mike never hears David's, and David never
+# hears Mike's. Any other number gets the privacy line and no info.
+# Phones are NOT in this file: set them in .env.local (gitignored), one variable
+# per driver key, comma-separated: GLOVEBOX_PHONES_MIKE=+1..., GLOVEBOX_PHONES_DAVID=...
+# Businesses, places and loads are fictional.
 
-business: Kestrel Line Freight
-driver: Mike # owner and driver
-truck: truck 1
+company: Take1 Trucking
 
-loads:
-  # On the road now: picked up this morning, delivering tonight.
-  - number: "4471"
-    status: in_transit # in_transit | scheduled
-    broker: Bluegate Logistics
-    pay: 2400.00 # flat rate, dollars
-    free_time_minutes: 120 # waiting allowed before detention starts
-    detention_per_hour: 50.00 # billed in quarter hours after free time
-    deadhead_minutes: 0 # drive to this pickup from the previous stop
-    pickup:
-      facility: Harlan Point Cold Storage
-      city: Springfield, Missouri
-      day: 0
-      time: "07:00"
-    delivery:
-      facility: Southmere Distribution
-      city: Tulsa, Oklahoma
-      day: 0
-      time: "21:00"
+drivers:
+  - key: mike
+    name: Mike
+    truck: truck 1
+    loads:
+      # Picked up this morning; delivery appointment was 4 PM. Depending on the call,
+      # he's still driving there (running late) or waiting at the dock (detention).
+      - number: "4471"
+        status: in_transit # in_transit | scheduled
+        broker: Bluegate Logistics
+        pay: 2400.00 # flat rate, dollars
+        free_time_minutes: 120 # waiting allowed before detention starts
+        detention_per_hour: 50.00 # billed in quarter hours after free time
+        deadhead_minutes: 0 # drive to this pickup from the previous stop
+        notes: # from dispatch, said when he asks what's changed or about a stop
+          - Southmere wants a call thirty minutes out.
+        pickup:
+          facility: Harlan Point Cold Storage
+          city: Springfield, Missouri
+          day: 0
+          time: "07:00"
+        delivery:
+          facility: Southmere Distribution
+          city: Tulsa, Oklahoma
+          day: 0
+          time: "16:00"
 
-  # Tomorrow: an early pickup an hour and a half from Tulsa. If 4471's
-  # delivery runs late tonight, this is the load at risk.
-  - number: "4482"
-    status: scheduled
-    broker: Prairie Run Logistics
-    pay: 1650.00
-    free_time_minutes: 120
-    detention_per_hour: 45.00
-    deadhead_minutes: 90
-    pickup:
-      facility: Corliss Packaging
-      city: Muskogee, Oklahoma
-      day: 1
-      time: "06:00"
-    delivery:
-      facility: Lakemont Grocery DC
-      city: Wichita, Kansas
-      day: 1
-      time: "14:00"
+      # Tomorrow: an early pickup an hour and a half from Tulsa. If 4471's
+      # delivery runs late tonight, this is the load at risk.
+      - number: "4482"
+        status: scheduled
+        broker: Prairie Run Logistics
+        pay: 1650.00
+        free_time_minutes: 120
+        detention_per_hour: 45.00
+        deadhead_minutes: 90
+        notes:
+          - At Corliss, check in at the guard shack, then dock four.
+        pickup:
+          facility: Corliss Packaging
+          city: Muskogee, Oklahoma
+          day: 1
+          time: "06:00"
+        delivery:
+          facility: Lakemont Grocery DC
+          city: Wichita, Kansas
+          day: 1
+          time: "14:00"
 
-  # Day after tomorrow: afternoon pickup after the truck's service,
-  # delivering the morning after.
-  - number: "4490"
-    status: scheduled
-    broker: Bluegate Logistics
-    pay: 2100.00
-    free_time_minutes: 120
-    detention_per_hour: 50.00
-    deadhead_minutes: 240
-    pickup:
-      facility: Tamsin Foods Warehouse
-      city: Joplin, Missouri
-      day: 2
-      time: "14:00"
-    delivery:
-      facility: Orrin Valley Foods
-      city: Little Rock, Arkansas
-      day: 3
-      time: "07:00"
+      # Day after tomorrow: afternoon pickup after the truck's service,
+      # delivering the morning after.
+      - number: "4490"
+        status: scheduled
+        broker: Bluegate Logistics
+        pay: 2100.00
+        free_time_minutes: 120
+        detention_per_hour: 50.00
+        deadhead_minutes: 240
+        pickup:
+          facility: Tamsin Foods Warehouse
+          city: Joplin, Missouri
+          day: 2
+          time: "14:00"
+        delivery:
+          facility: Orrin Valley Foods
+          city: Little Rock, Arkansas
+          day: 3
+          time: "07:00"
 
-# Things on the schedule that aren't loads.
-events:
-  - what: Oil change and PM service
-    place: Benton Truck and Trailer Repair in Joplin
-    day: 2
-    time: "08:00"
-  - what: Home time starts
-    place: home in Joplin
-    day: 3
-    time: "15:00"
+    # Things on the schedule that aren't loads.
+    events:
+      - what: Oil change and PM service
+        place: Benton Truck and Trailer Repair in Joplin
+        day: 2
+        time: "08:00"
+      - what: Home time starts
+        place: home in Joplin
+        day: 3
+        time: "15:00"
+
+  - key: david
+    name: David
+    truck: truck 2
+    loads:
+      # On the road now: grain from a co-op to a feed mill.
+      - number: "5203"
+        status: in_transit
+        broker: Prairie Run Logistics
+        free_time_minutes: 120
+        detention_per_hour: 45.00
+        notes:
+          - Dellacourt Farm wants a call when you're twenty minutes out.
+        pickup:
+          facility: Halvern Farm Co-op
+          city: Salina, Kansas
+          day: 0
+          time: "09:00"
+        delivery:
+          facility: Dellacourt Farm
+          city: Hutchinson, Kansas
+          day: 0
+          time: "17:00"
+      - number: "5210"
+        status: scheduled
+        broker: Prairie Run Logistics
+        deadhead_minutes: 60
+        pickup:
+          facility: Ostrander Fertilizer Depot
+          city: Hutchinson, Kansas
+          day: 1
+          time: "08:00"
+        delivery:
+          facility: Sutter Ridge Farm
+          city: Great Bend, Kansas
+          day: 1
+          time: "13:00"

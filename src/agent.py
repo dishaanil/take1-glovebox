@@ -14,6 +14,7 @@ import logging
 import os
 
 from dotenv import load_dotenv
+from livekit import rtc
 from livekit.agents import (
     Agent,
     AgentServer,
@@ -32,7 +33,7 @@ from livekit.agents import (
 )
 from livekit.plugins import ai_coustics
 
-from glovebox_agent import GloveboxAgent, stt_keyterms
+from glovebox_agent import GloveboxAgent, agent_for_caller, stt_keyterms
 from models import load_models
 
 logger = logging.getLogger("agent")
@@ -58,16 +59,24 @@ MAX_CHECK_INS = 2
 
 # Filler: if the agent is still thinking this long after he stops talking, say a
 # short canned line so the line never goes dead. One per turn.
-FILLER_DELAY = float(os.getenv("FILLER_DELAY", "1.0"))
+FILLER_DELAY = float(os.getenv("FILLER_DELAY", "0.5"))
 
 
-def pick_agent() -> Agent:
+async def pick_agent(ctx: JobContext) -> Agent:
+    """Glovebox picks by caller ID, so it looks at who's calling first."""
     profile = os.getenv("AGENT_PROFILE", "glovebox").strip().lower()
     if profile not in AGENTS:
         raise ValueError(
             f"Unknown AGENT_PROFILE '{profile}'. Choose one of: {', '.join(AGENTS)}"
         )
-    return AGENTS[profile]()
+    await ctx.connect()
+    participant = await ctx.wait_for_participant()
+    phone = None
+    if participant.kind == rtc.ParticipantKind.PARTICIPANT_KIND_SIP:
+        phone = participant.attributes.get("sip.phoneNumber") or ""
+    agent = agent_for_caller(phone)
+    logger.info("caller routed to %s", type(agent).__name__)
+    return agent
 
 
 def handle_silence(session: AgentSession) -> None:
@@ -235,7 +244,7 @@ async def entrypoint(ctx: JobContext) -> None:
     ctx.add_shutdown_callback(log_usage)
 
     await session.start(
-        agent=pick_agent(),
+        agent=await pick_agent(ctx),
         room=ctx.room,
         room_options=room_io.RoomOptions(
             audio_input=room_io.AudioInputOptions(
@@ -249,7 +258,7 @@ async def entrypoint(ctx: JobContext) -> None:
         ),
     )
 
-    await ctx.connect()
+    await ctx.connect()  # already connected by pick_agent; kept for other profiles
 
 
 if __name__ == "__main__":

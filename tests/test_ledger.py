@@ -156,7 +156,7 @@ def test_load_number_is_spoken_digit_by_digit():
     assert books().load_summary().startswith("Load four four seven one pays")
 
 
-# ---- seed and schedule (NOW is 5:30 PM; 4471 delivers at 9 PM today) ----
+# ---- seed and schedule (NOW is 5:30 PM; 4471 delivers at 4 PM today) ----
 
 
 def test_seed_loads_from_yaml():
@@ -175,7 +175,7 @@ def test_seed_loads_from_yaml():
 def test_schedule_covers_the_next_three_days():
     summary = books().full_schedule()
     for expected in (
-        "Load four four seven one delivery at Southmere Distribution in Tulsa, today at nine PM.",
+        "Load four four seven one delivery at Southmere Distribution in Tulsa, today at four PM.",
         "Load four four eight two pickup at Corliss Packaging in Muskogee, tomorrow at six AM.",
         "Oil change and PM service at Benton Truck and Trailer Repair in Joplin, Sunday at eight AM",
         "Load four four nine zero delivery at Orrin Valley Foods in Little Rock, Monday at seven AM.",
@@ -205,7 +205,7 @@ def test_running_late_with_room_to_spare():
     assert c.new_time == datetime(2026, 11, 6, 23, 0)
     assert c.readback() == (
         "Load four four seven one delivery at Southmere Distribution: you're now expected "
-        "today at eleven PM instead of today at nine PM, because of traffic. That still "
+        "today at eleven PM instead of today at four PM, because of traffic. That still "
         "leaves time for your six AM pickup at Corliss Packaging."
     )
 
@@ -306,3 +306,168 @@ def test_new_report_replaces_unconfirmed_one_for_the_same_stop():
     b.confirm([nine.ref])
     assert b.find_load("4482").stops["pickup"].appointment.hour == 9
     assert not b.has_pending()
+
+
+# ---- dispatch flags (NOW is 5:30 PM) ----
+
+
+def test_road_closure_readback_has_every_detail_he_gave():
+    b = books()
+    f = b.report_flag(
+        "road_closure",
+        location="I-44",
+        direction="eastbound",
+        mile_marker="212",
+        delay_minutes=120,
+        reason="a hazmat crash",
+        request="a quicker route approved and the receiver told",
+    )
+    assert f.status == "pending"
+    assert f.readback() == (
+        "Eastbound closure on I-44 at mile marker 212, because of a hazmat crash. "
+        "You're looking at about two hours of delay. Load four four seven one. "
+        "You want a quicker route approved and the receiver told."
+    )
+    b.confirm([f.ref])
+    assert f.status == "confirmed"
+
+
+def test_closure_leaves_out_what_he_didnt_say():
+    f = books().report_flag("road_closure", location="I-44")
+    assert f.readback() == "A closure on I-44. Load four four seven one."
+
+
+def test_breakdown_keeps_location_and_doesnt_diagnose():
+    f = books().report_flag(
+        "breakdown",
+        location="I-44 westbound near mile marker 180",
+        truck_disabled=True,
+        safe=True,
+        reason="engine lost power",
+        request="a tow",
+    )
+    assert f.readback() == (
+        "Truck 1 is disabled at I-44 westbound near mile marker 180, and you're "
+        "safely off the road. Load four four seven one. What happened: engine lost "
+        "power. You're asking for a tow."
+    )
+
+
+def test_receiver_detention_starts_the_clock_at_the_appointment():
+    b = books()  # Southmere appointment 4 PM
+    f = b.report_flag(
+        "detention",
+        facility="Southmere",
+        arrived_at="3:30",
+        reason="the load isn't in their system",
+        request="get the paperwork sorted and document detention",
+    )
+    assert f.clock_start == datetime(2026, 11, 6, 16, 0)
+    assert f.readback() == (
+        "At Southmere Distribution, in since three thirty PM. The detention clock "
+        "started at four PM, so that's one hour and thirty minutes so far. Load four "
+        "four seven one. Reason they gave: the load isn't in their system. You want "
+        "dispatch to get the paperwork sorted and document detention."
+    )
+    assert b.find_load("4471").stops["delivery"].arrived == datetime(
+        2026, 11, 6, 15, 30
+    )
+
+
+def test_detention_needs_an_arrival_time():
+    with pytest.raises(LedgerError, match="What time did you get to Southmere"):
+        books().report_flag("detention", facility="Southmere")
+
+
+def test_emergency_saves_immediately():
+    b = books()
+    f = b.report_flag(
+        "emergency",
+        location="the shoulder of I-44 near Vinita",
+        reason="smoke from the engine",
+        needs=["fire", "tow"],
+        safe=True,
+    )
+    assert f.status == "confirmed"
+    assert not b.has_pending()
+    assert f.readback() == (
+        "Emergency flagged to dispatch: smoke from the engine at the shoulder of I-44 "
+        "near Vinita. Needs the fire department and a tow. You're at a safe spot."
+    )
+
+
+def test_traffic_delay_in_minutes_does_the_clock_math():
+    c = books().report_change(
+        "running_late", stop="delivery", delay_minutes=45, note="a multi-car crash"
+    )
+    # The 4 PM appointment has passed at 5:30, so the delay counts from now.
+    assert c.new_time == datetime(2026, 11, 6, 18, 15)
+    assert c.readback().startswith(
+        "Load four four seven one delivery at Southmere Distribution: you're now "
+        "expected today at six fifteen PM instead of today at four PM, because "
+        "of a multi-car crash."
+    )
+
+
+def test_traffic_delay_counts_from_the_appointment_when_its_ahead():
+    c = books().report_change(
+        "running_late", "4482", "pickup", delay_minutes=45, note="a crash"
+    )
+    assert c.new_time == datetime(2026, 11, 7, 6, 45)
+
+
+def test_issue_with_a_delay_is_a_delay():
+    c = books().report_change("issue", delay_minutes=30, note="traffic")
+    assert c.kind == "running_late"
+
+
+# ---- schedule the way a driver hears it ----
+
+
+def test_schedule_update_with_nothing_changed():
+    assert books().schedule_update() == (
+        "Nothing's changed. Next up: load four four seven one delivery at Southmere "
+        "Distribution in Tulsa, today at four PM. From dispatch: Southmere wants a call "
+        "thirty minutes out. At Corliss, check in at the guard shack, then dock four."
+    )
+
+
+def test_schedule_update_leads_with_what_changed():
+    b = books()
+    b.confirm([b.report_change("appointment_moved", "4482", "pickup", "9").ref])
+    update = b.schedule_update()
+    assert update.startswith(
+        "What's changed: Load four four eight two pickup at Corliss Packaging moved "
+        "from tomorrow at six AM to tomorrow at nine AM."
+    )
+
+
+def test_stop_details_include_dispatch_notes():
+    assert books().stop_details("Corliss") == (
+        "Corliss Packaging in Muskogee is the pickup for load four four eight two, "
+        "tomorrow at six AM. At Corliss, check in at the guard shack, then dock four."
+    )
+
+
+# ---- drivers are kept apart ----
+
+
+def test_each_driver_gets_only_their_own_books(monkeypatch):
+    from ledger import driver_for_phone
+
+    monkeypatch.setenv("GLOVEBOX_PHONES_MIKE", "+1 555 010 0123")
+    monkeypatch.setenv("GLOVEBOX_PHONES_DAVID", "555-010-0456")
+
+    mike, david = books(), load_books(NOW, driver="david")
+    assert (mike.driver, mike.business) == ("Mike", "Take1 Trucking")
+    assert [load.number for load in david.loads] == ["5203", "5210"]
+    assert not {load.number for load in mike.loads} & {
+        load.number for load in david.loads
+    }
+    assert "Dellacourt" not in mike.full_schedule()
+    assert "Southmere" not in david.full_schedule()
+    assert driver_for_phone("+1 (555) 010-0123") == "mike"
+    assert driver_for_phone("5550100123") == "mike"
+    assert driver_for_phone("+15550100456") == "david"
+    assert driver_for_phone("+1 212 555 0100") is None
+    assert driver_for_phone("") is None

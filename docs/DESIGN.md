@@ -1,6 +1,7 @@
 # Glovebox design decisions
 
-Glovebox is a voice bookkeeper a truck driver calls from the cab. These are the
+Glovebox is the line a truck driver calls from the cab: it keeps his books and
+flags problems to dispatch. These are the
 choices behind the voice pipeline, and why. Status is updated as each one lands.
 
 | # | Decision | Status |
@@ -80,7 +81,7 @@ runs, and Glovebox's tools are in memory and finish in about a millisecond. The
 wait is the LLM: once to pick the tool, again to word the reply. So the filler
 hooks the agent's "thinking" state instead (`handle_slow_turns` in `agent.py`):
 
-- If the agent is still thinking 1.0 s after he stops (`FILLER_DELAY`), say one
+- If the agent is still thinking 0.5 s after his turn ends (`FILLER_DELAY`; was 1.0, which felt slow on a real call), say one
   short line. At most one per turn; fast turns get none.
 - The line matches what he said: "Let me check your schedule.", "Pulling up the
   numbers.", "Got it, one sec." Canned text, so it can't state a wrong number.
@@ -124,6 +125,36 @@ audio, the silence the driver actually hears. When the call ends, the log has
 the median and worst. Text simulations have no audio, so the numbers come from
 real calls. (LiveKit marks `metrics_collected` deprecated in favor of
 `ChatMessage.metrics`; it still works on 1.8.)
+
+## Dispatch, safety and privacy (2026-11-06)
+
+- **One number, one record shape.** Road closures, breakdowns, receiver
+  detention and emergencies go through `flag_dispatch`. The code writes the
+  readback from only the details he gave (nothing guessed), and after his yes
+  the agent tells him what dispatch is doing, so he doesn't need to call back.
+- **Safety outranks intake.** Smoke, fire, a crash or an injury: the first reply
+  is "are you safe, get clear, call nine one one", then the flag. Emergency flags
+  are the one thing saved without a yes, because speed matters more than a
+  readback.
+- **Breakdowns don't re-ask.** Location and truck are kept from his first
+  sentence. No engine diagnosis, no promised tow company or arrival time.
+- **Receiver detention evidence.** Arrival, facility, the reason given and the
+  request, with the clock starting at the later of arrival and appointment.
+- **Hands-free delays.** "Forty-five minutes behind" becomes `delay_minutes`; the
+  code works out the new time (from the appointment, or from now if that has
+  passed), so he never looks anything up.
+- **Schedule for the ear.** By default: what changed, what's next, and dispatch
+  notes. The whole week only when asked. Stop questions give the stop, the time
+  and the notes, not addresses.
+- **Privacy by caller ID.** Take1 Trucking has two drivers, Mike and David.
+  Their phones are set in `.env.local` (`GLOVEBOX_PHONES_MIKE`, ...), so real
+  numbers never reach git. A call loads only that driver's books, so
+  Mike's agent has nothing of David's in its prompt or tools, and the other
+  way round. Any other number gets `GateAgent`, which holds no driver data at
+  all and only says, for privacy, that the line serves registered drivers on
+  their own phones. No PIN: a number that isn't listed gets nothing.
+- **Company driver, not owner.** Mike drives for Take1 Trucking, so load pay,
+  rates and profit are "for the office"; the profit tool is gone from his line.
 
 ## Rejected
 

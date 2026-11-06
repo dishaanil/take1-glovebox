@@ -305,6 +305,8 @@ class Load:
     # Drive time from the previous stop on the schedule to this load's pickup.
     deadhead_minutes: int
     stops: dict[str, Stop]
+    # Notes from dispatch, said when he asks what's changed or about a stop.
+    notes: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -334,6 +336,32 @@ class Change:
         return self.readback_text
 
 
+FLAG_KINDS = ("road_closure", "breakdown", "detention", "emergency", "other")
+EMERGENCY_NEEDS = {
+    "fire": "the fire department",
+    "ambulance": "an ambulance",
+    "police": "the police",
+    "tow": "a tow",
+    "repair": "roadside repair",
+}
+
+
+@dataclass
+class Flag:
+    """Something dispatch has to act on. Emergencies save at once; the rest
+    wait for his yes, like everything else."""
+
+    ref: str
+    kind: str
+    load_number: str | None
+    readback_text: str
+    status: str = "pending"  # pending | confirmed | discarded
+    clock_start: datetime | None = None  # detention: when the wait started counting
+
+    def readback(self) -> str:
+        return self.readback_text
+
+
 def day_words(t: datetime, now: datetime) -> str:
     days = (t.date() - now.date()).days
     return {0: "today", 1: "tomorrow", -1: "yesterday"}.get(days, f"{t:%A}")
@@ -349,6 +377,7 @@ class Books:
     now: datetime
     expenses: list[Expense] = field(default_factory=list)
     changes: list[Change] = field(default_factory=list)
+    flags: list[Flag] = field(default_factory=list)
 
     @property
     def load(self) -> Load:
@@ -430,7 +459,12 @@ class Books:
         e.status = "discarded"
         return e
 
-    def _record(self, ref: str) -> Expense | Change:
+    def _record(self, ref: str) -> Expense | Change | Flag:
+        if ref.strip().upper().startswith("D"):
+            for f in self.flags:
+                if f.ref.lower() == ref.strip().lower() and f.status != "discarded":
+                    return f
+            raise LedgerError("I can't find that report. Which one do you mean?")
         if ref.strip().upper().startswith("S"):
             for c in self.changes:
                 if c.ref.lower() == ref.strip().lower() and c.status != "discarded":
@@ -438,7 +472,7 @@ class Books:
             raise LedgerError("I can't find that change. Which one do you mean?")
         return self._expense(ref)
 
-    def confirm(self, refs: list[str]) -> list[Expense | Change]:
+    def confirm(self, refs: list[str]) -> list[Expense | Change | Flag]:
         found = [self._record(r) for r in refs]
         for record in found:
             if isinstance(record, Change) and record.status == "pending":
@@ -451,7 +485,11 @@ class Books:
 
     def has_pending(self) -> bool:
         """Anything read back but not yet confirmed: expenses or schedule changes."""
-        return bool(self.pending()) or any(c.status == "pending" for c in self.changes)
+        return (
+            bool(self.pending())
+            or any(c.status == "pending" for c in self.changes)
+            or any(f.status == "pending" for f in self.flags)
+        )
 
     # -- stops and detention --
 
@@ -660,10 +698,11 @@ class Books:
         new_time: str | None = None,
         new_date: str | None = None,
         note: str = "",
+        delay_minutes: int | None = None,
     ) -> Change:
         ref = f"S{len(self.changes) + 1}"
         note = note.strip()
-        if kind == "issue" and new_time:
+        if kind == "issue" and (new_time or delay_minutes):
             # "Reefer alarm, I won't make it till five": a problem that comes with a
             # new time is a delay, with the problem as the reason.
             kind = "running_late"
@@ -680,7 +719,7 @@ class Books:
             change = Change(ref, load.number, kind, note)
             change.readback_text = f"Load {digit_words(load.number)} for {load.broker} is cancelled{reason}."
         elif kind in ("running_late", "appointment_moved"):
-            if not new_time:
+            if not new_time and not (kind == "running_late" and delay_minutes):
                 raise LedgerError("What time are we looking at now?")
             s = self.stop(stop or "delivery", load_number)
             base = s.appointment.replace(hour=0, minute=0)
@@ -691,7 +730,13 @@ class Books:
                     )
                 except ValueError as err:
                     raise LedgerError("Which day is that?") from err
-            if kind == "running_late" and not new_date:
+            if kind == "running_late" and not new_time:
+                # "Forty-five minutes behind": the code does the clock math, so he
+                # never has to look up or work out a time while driving.
+                # Counted from his planned arrival, or from now if that's passed.
+                start = max(s.eta or s.appointment, self.now)
+                when = start + timedelta(minutes=int(delay_minutes))
+            elif kind == "running_late" and not new_date:
                 # Late means later than he was expected.
                 when = parse_time(new_time, base, after=s.eta or s.appointment)
             else:
@@ -732,6 +777,155 @@ class Books:
             load.stops[c.stop_kind].eta = c.new_time
         elif c.kind == "appointment_moved" and load and c.stop_kind:
             load.stops[c.stop_kind].appointment = c.new_time  # type: ignore[assignment]
+
+    # -- dispatch flags --
+
+    def report_flag(
+        self,
+        kind: str,
+        load_number: str | None = None,
+        location: str | None = None,
+        direction: str | None = None,
+        mile_marker: str | None = None,
+        delay_minutes: int | None = None,
+        reason: str | None = None,
+        request: str | None = None,
+        facility: str | None = None,
+        arrived_at: str | None = None,
+        truck_disabled: bool | None = None,
+        safe: bool | None = None,
+        needs: list[str] | None = None,
+    ) -> Flag:
+        """Build the readback for something dispatch has to act on. Missing details
+        are left out, not guessed; he can add them later or dispatch will ask."""
+        if kind not in FLAG_KINDS:
+            kind = "other"
+        load = self.find_load(load_number) if load_number else self.load
+        on_load = f"Load {digit_words(load.number)}"
+        ref = f"D{len(self.flags) + 1}"
+        where = location.strip() if location else ""
+        clock_start = None
+
+        if kind == "road_closure":
+            head = (
+                f"{direction.strip().capitalize()} closure"
+                if direction
+                else "A closure"
+            )
+            parts = [head + (f" on {where}" if where else "")]
+            if mile_marker:
+                parts.append(f"at mile marker {mile_marker.strip()}")
+            text = " ".join(parts)
+            if reason:
+                text += f", because of {reason.strip()}"
+            text += "."
+            if delay_minutes:
+                text += f" You're looking at about {duration_words(int(delay_minutes))} of delay."
+            text += f" {on_load}."
+            if request:
+                text += f" You want {request.strip()}."
+
+        elif kind == "breakdown":
+            text = f"{self.truck.capitalize()} is "
+            text += "disabled" if truck_disabled is not False else "having trouble"
+            text += (
+                f" {('at ' + where) if where else 'at a location dispatch still needs'}"
+            )
+            if safe is True:
+                text += ", and you're safely off the road"
+            text += f". {on_load}."
+            if reason:
+                text += f" What happened: {reason.strip()}."
+            if request:
+                text += f" You're asking for {request.strip()}."
+
+        elif kind == "detention":
+            s = self.stop(facility or "delivery", load.number)
+            if arrived_at:
+                s.arrived = parse_time(arrived_at, self.now)
+            if not s.arrived:
+                raise LedgerError(f"What time did you get to {s.facility}?")
+            clock_start = max(s.arrived, s.appointment)
+            waited = int((self.now - clock_start).total_seconds() // 60)
+            text = (
+                f"At {s.facility}, in since {time_words(s.arrived)}. The detention clock "
+                f"started at {time_words(clock_start)}, so that's {duration_words(max(0, waited))} "
+                f"so far. {on_load}."
+            )
+            if reason:
+                text += f" Reason they gave: {reason.strip()}."
+            if request:
+                text += f" You want dispatch to {request.strip()}."
+
+        elif kind == "emergency":
+            asked = [EMERGENCY_NEEDS.get(n, n) for n in (needs or [])]
+            text = "Emergency flagged to dispatch"
+            if reason:
+                text += f": {reason.strip()}"
+            if where:
+                text += f" at {where}"
+            text += "."
+            if asked:
+                text += " Needs " + _join(asked) + "."
+            if safe is True:
+                text += " You're at a safe spot."
+            elif safe is False:
+                text += " You're not safe yet."
+            flag = Flag(ref, kind, load.number, text, status="confirmed")
+            self.flags.append(flag)
+            return flag
+
+        else:
+            if not reason:
+                raise LedgerError("What's going on?")
+            text = f"For dispatch: {reason.strip()}. {on_load}."
+            if request:
+                text += f" You want {request.strip()}."
+
+        flag = Flag(ref, kind, load.number, text, clock_start=clock_start)
+        self.flags.append(flag)
+        return flag
+
+    # -- schedule, the way a driver hears it --
+
+    def schedule_update(self) -> str:
+        """What changed and what's next, for a driver who already knows his week."""
+        lines: list[str] = []
+        changed = [c for c in self.changes if c.status == "confirmed"]
+        if changed:
+            lines.append(
+                "What's changed: "
+                + " ".join(
+                    c.readback().split(". Heads up")[0].rstrip(".") + "."
+                    for c in changed
+                )
+            )
+        else:
+            lines.append("Nothing's changed.")
+        upcoming = [i for i in self.schedule() if not i[2]]
+        if upcoming:
+            first = upcoming[0][1]
+            lines.append("Next up: " + first[0].lower() + first[1:] + ".")
+        notes = [
+            n for load in self.loads if load.status != "cancelled" for n in load.notes
+        ][:2]
+        if notes:
+            lines.append("From dispatch: " + " ".join(notes))
+        return " ".join(lines)
+
+    def stop_details(self, name: str, load_number: str | None = None) -> str:
+        s = self.stop(name, load_number)
+        load = self.find_load(s.load_number)
+        when = s.eta or s.appointment
+        text = (
+            f"{s.facility} in {s.city.split(',')[0]} is the {s.kind} for load "
+            f"{digit_words(load.number)}, {self._when(s.appointment)}."
+        )
+        if s.eta:
+            text += f" You're expected {self._when(when)}."
+        if load.notes:
+            text += " " + " ".join(load.notes)
+        return text
 
     # -- money questions --
 
@@ -775,6 +969,10 @@ class Books:
         return line
 
 
+def _join(items: list[str]) -> str:
+    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
+
+
 # ---- seed -----------------------------------------------------------------
 
 SEED_FILE = Path(__file__).resolve().parent.parent / "seed.yaml"
@@ -792,30 +990,76 @@ def _clock(value: str | int) -> timedelta:
     return timedelta(hours=int(hours), minutes=int(minutes or 0))
 
 
-def load_books(now: datetime | None = None, path: Path = SEED_FILE) -> Books:
-    """Build a fresh ledger from seed.yaml. Days in the file count from today."""
+def _phone_digits(phone: str) -> str:
+    """Last ten digits, so "+1 (555) 010-0123" and "5550100123" match."""
+    return "".join(ch for ch in str(phone) if ch.isdigit())[-10:]
+
+
+def _seed(path: Path = SEED_FILE) -> dict:
+    return yaml.safe_load(path.read_text())
+
+
+def driver_keys(path: Path = SEED_FILE) -> list[str]:
+    return [d["key"] for d in _seed(path)["drivers"]]
+
+
+def driver_phones(key: str) -> list[str]:
+    """A driver's phones, from GLOVEBOX_PHONES_<KEY> in .env.local (comma-separated).
+
+    Real numbers stay out of seed.yaml and out of git.
+    """
+    raw = os.getenv(f"GLOVEBOX_PHONES_{key.upper()}", "")
+    return [p.strip() for p in raw.split(",") if p.strip()]
+
+
+def driver_for_phone(phone: str, path: Path = SEED_FILE) -> str | None:
+    """The driver whose phone this is, or None for anyone else."""
+    digits = _phone_digits(phone)
+    if len(digits) < 10:
+        return None
+    for d in _seed(path)["drivers"]:
+        if any(_phone_digits(p) == digits for p in driver_phones(d["key"])):
+            return d["key"]
+    return None
+
+
+def load_books(
+    now: datetime | None = None, path: Path = SEED_FILE, driver: str | None = None
+) -> Books:
+    """One driver's books from seed.yaml, and nothing about anyone else.
+
+    Days in the file count from today. `driver` is a key like "mike"; the first
+    driver in the file when left out.
+    """
     # GLOVEBOX_NOW (like 2026-11-06T17:30) pins the clock for simulations.
     pinned = os.getenv("GLOVEBOX_NOW")
     now = now or (datetime.fromisoformat(pinned) if pinned else datetime.now())
     now = now.replace(second=0, microsecond=0)
     today = now.replace(hour=0, minute=0)
-    seed = yaml.safe_load(path.read_text())
+    seed = _seed(path)
+    drivers = seed["drivers"]
+    me = (
+        next((d for d in drivers if d["key"] == driver), None) if driver else drivers[0]
+    )
+    if me is None:
+        raise LedgerError(f"No driver {driver} in the seed.")
 
     def at(item: dict) -> datetime:
         return today + timedelta(days=int(item["day"])) + _clock(item["time"])
 
     loads = []
-    for raw in seed["loads"]:
+    for raw in me.get("loads", []):
         number = str(raw["number"])
         loads.append(
             Load(
                 number=number,
                 broker=raw["broker"],
-                pay=Decimal(str(raw["pay"])),
+                pay=Decimal(str(raw.get("pay", 0))),
                 free_minutes=int(raw.get("free_time_minutes", 120)),
                 detention_rate=Decimal(str(raw.get("detention_per_hour", 50))),
                 status=raw.get("status", "scheduled"),
                 deadhead_minutes=int(raw.get("deadhead_minutes", 0)),
+                notes=list(raw.get("notes", [])),
                 stops={
                     kind: Stop(
                         number,
@@ -829,11 +1073,11 @@ def load_books(now: datetime | None = None, path: Path = SEED_FILE) -> Books:
                 },
             )
         )
-    events = [Event(e["what"], e["place"], at(e)) for e in seed.get("events", [])]
+    events = [Event(e["what"], e["place"], at(e)) for e in me.get("events", [])]
     return Books(
-        driver=seed["driver"],
-        business=seed["business"],
-        truck=seed["truck"],
+        driver=me["name"],
+        business=seed["company"],
+        truck=me["truck"],
         loads=loads,
         events=events,
         now=now,

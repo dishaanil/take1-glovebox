@@ -7,11 +7,11 @@
 # Assumptions:
 # - The clock is pinned to Friday 2026-11-06, 5:30 PM (GLOVEBOX_NOW). Data comes
 #   from seed.yaml: Mike is on load 4471, delivering at Southmere Distribution in
-#   Tulsa at 9 PM; load 4482 picks up at Corliss Packaging in Muskogee tomorrow at
+#   Tulsa at 4 PM; load 4482 picks up at Corliss Packaging in Muskogee tomorrow at
 #   6 AM, 90 minutes away. Pickup appointment for 4471 was 7 AM at Harlan Point;
 #   two hours free, then $50 an hour.
 # - Expectations judge outcomes, not wording. Silence and talking over the agent
-#   need audio; those are checked on a real call (docs/CALL_CHECKS.md).
+#   need audio; those are checked on a real call (docs/TEST_SCRIPTS.md).
 id: SCNG_RDVtG2SkUqWR
 name: Glovebox - difficult callers
 scenarios:
@@ -22,14 +22,13 @@ scenarios:
       OPENING LINE: "Fueled up at Love's in Joplin, a hundred forty gallons, five twelve forty on the fuel card. Oh and a twelve dollar toll."
       DO, IN ORDER:
       1. When both are read back, say "Yep, that's right."
-      2. Ask "How's this load doing?"
+      2. Ask "What's this load paying me anyway?"
       3. Say "That's it, thanks" and hang up.
     agent_expectations: >
       Reads back both expenses together (fuel at Love's in Joplin, 140 gallons,
       $512.40 on the fuel card, and a $12 toll) before recording anything, and
-      records them only after Mike says yes. The load summary says the load pays
-      $2,400 and nets $1,875.60 after the confirmed costs. Never says an internal
-      code like E1. Replies are one or two short spoken sentences.
+      records them only after Mike says yes. Doesn't quote load pay or rates:
+      says that's for the office. Never says an internal code like E1. Replies are one or two short spoken sentences.
     tags:
       criterion: did-the-job
       feature: expenses
@@ -117,7 +116,7 @@ scenarios:
       3. Say "Ugh, okay. Bye."
     agent_expectations: >
       Reads back that the Southmere Distribution delivery is now expected tomorrow
-      at 5 AM instead of 9 PM tonight, and warns, without being asked, that this puts
+      at 5 AM instead of 4 PM today, and warns, without being asked, that this puts
       the 6 AM pickup at Corliss Packaging tomorrow at risk. Records the change only
       after Mike confirms. Acknowledges the stress in a few words. Does not promise
       that the broker or anyone else will be notified.
