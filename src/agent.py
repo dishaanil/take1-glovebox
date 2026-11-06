@@ -1,10 +1,10 @@
 """Entry point: wires the voice pipeline and picks which agent answers.
 
-You mostly edit my_agent.py. Come here to change models, silence handling or
-turn-taking.
+The agent itself is glovebox_agent.py. Come here to change models, silence
+handling or turn-taking.
 
   .env.local
-    AGENT_PROFILE = booking | screener | mine     (which agent answers)
+    AGENT_PROFILE = glovebox                      (which agent answers)
     MODEL_PRESET  = budget  | quality             (see models.py)
     AGENT_NAME    = take2-agent                   (must match your dispatch rule)
 """
@@ -28,19 +28,15 @@ from livekit.agents import (
 )
 from livekit.plugins import ai_coustics
 
-from booking_agent import BookingAgent
+from glovebox_agent import GloveboxAgent
 from models import load_models
-from my_agent import MyAgent
-from screener_agent import ScreenerAgent
 
 logger = logging.getLogger("agent")
 
 load_dotenv(".env.local")
 
 AGENTS: dict[str, type[Agent]] = {
-    "booking": BookingAgent,
-    "screener": ScreenerAgent,
-    "mine": MyAgent,
+    "glovebox": GloveboxAgent,
 }
 
 AGENT_NAME = os.getenv("AGENT_NAME", "take2-agent")
@@ -52,7 +48,7 @@ MAX_CHECK_INS = 2
 
 
 def pick_agent() -> Agent:
-    profile = os.getenv("AGENT_PROFILE", "booking").strip().lower()
+    profile = os.getenv("AGENT_PROFILE", "glovebox").strip().lower()
     if profile not in AGENTS:
         raise ValueError(
             f"Unknown AGENT_PROFILE '{profile}'. Choose one of: {', '.join(AGENTS)}"
@@ -102,7 +98,21 @@ async def entrypoint(ctx: JobContext) -> None:
         stt=models.stt,
         # Bias transcription toward words it would otherwise misspell.
         stt_context_options=STTContextOptions(
-            keyterms=["Take2", "LiveKit"],
+            keyterms=[
+                "Glovebox",
+                "Love's",
+                "Pilot",
+                "Flying J",
+                "Petro",
+                "DEF",
+                "lumper",
+                "washout",
+                "scale ticket",
+                "detention",
+                "Harlan Point",
+                "Southmere",
+                "Bluegate",
+            ],
             keyterm_detection={"enabled": True},
         ),
         # Brain: the LLM

@@ -98,11 +98,9 @@ src/
   agent.py           entry point: pipeline, silence handling, picks the agent
   models.py          model presets (budget | quality); swap models here
   prompts.py         shared voice rules + difficult-caller rules
-  booking_agent.py   example: dental receptionist, books appointments
-  screener_agent.py  example: recruiter, runs a 4-question phone screen
-  my_agent.py        YOUR agent; start here
-scenarios.yaml           difficult-caller simulations for the booking agent
-scenarios-screener.yaml  simulations for the screener agent
+  glovebox_agent.py  Glovebox: voice bookkeeper for truck drivers (prompt + tools)
+  ledger.py          money, time and detention math, readback wording
+tests/test_ledger.py     unit tests for the ledger
 dispatch-rule.json       routes phone calls to your agent
 ```
 

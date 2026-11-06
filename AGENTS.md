@@ -4,9 +4,9 @@ This is a LiveKit Agents project. LiveKit Agents is a Python SDK for building vo
 
 ## This repo (Take2 voice agent hackathon)
 
-- `src/agent.py` is the entry point. It builds the `AgentSession`, handles caller silence, and picks the agent class from `AGENT_PROFILE` (`booking`, `screener`, `mine`).
-- `src/my_agent.py` is where the team builds their own agent. Prefer editing it over the examples.
-- `src/booking_agent.py` and `src/screener_agent.py` are reference examples of a focused prompt plus `@function_tool` tools.
+- `src/agent.py` is the entry point. It builds the `AgentSession`, handles caller silence, and picks the agent class from `AGENT_PROFILE` (`glovebox`).
+- `src/glovebox_agent.py` is Glovebox, a voice bookkeeper truck drivers call from the road: prompt plus `@function_tool` tools.
+- `src/ledger.py` holds all money, time and detention math and the exact readback wording. The LLM never computes numbers; tools return sentences to say. Unit tests in `tests/test_ledger.py`.
 - `src/prompts.py` holds shared voice and difficult-caller rules. Every agent's instructions go through `build_instructions()`.
 - `src/models.py` holds model presets. All models run through LiveKit Inference; do not add provider API keys or plugins unless the team asks.
 - The agent must work on a live phone call. Keep replies short, confirm details out loud, and keep the `EndCallTool`.
