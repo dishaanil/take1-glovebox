@@ -10,6 +10,7 @@ Prices:           https://livekit.com/pricing/inference
 Rough cost per minute of conversation (our estimate, not LiveKit's):
   budget    ~ $0.015 / min   -> the free $2.50 credit lasts ~150 min
   quality   ~ $0.03  / min   -> the free $2.50 credit lasts ~80 min
+  glovebox  ~ quality        (Deepgram + Gemini Flash + Cartesia)
 Text-to-speech is usually the biggest line item.
 """
 
@@ -53,7 +54,28 @@ def quality() -> Models:
     )
 
 
-PRESETS = {"budget": budget, "quality": quality}
+def glovebox() -> Models:
+    """Tuned for a driver reading out money and times from the cab.
+
+    Deepgram with numerals writes "five twelve forty" as 512.40, which the ledger
+    can parse. Gemini Flash calls the right tool with the right arguments more
+    reliably than Gemma. Cartesia is the most natural voice of the three presets.
+    """
+    return Models(
+        stt=inference.STT(
+            model="deepgram/nova-3",
+            language="en",
+            extra_kwargs={"smart_format": True, "numerals": True},
+        ),
+        llm=inference.LLM(model=os.getenv("GLOVEBOX_LLM", "google/gemini-3.5-flash")),
+        tts=inference.TTS(
+            model="cartesia/sonic-3", voice="9626c31c-bec5-4cca-baa8-f8ba9e84c8bc"
+        ),
+        expressive=False,
+    )
+
+
+PRESETS = {"budget": budget, "quality": quality, "glovebox": glovebox}
 
 
 def load_models() -> Models:

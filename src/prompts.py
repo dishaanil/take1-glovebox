@@ -37,9 +37,9 @@ DIFFICULT_CALLER_RULES = """
 """
 
 
-def build_instructions(job_prompt: str) -> str:
+def build_instructions(job_prompt: str, today: date | None = None) -> str:
     """Your agent's prompt plus today's date and the shared rules."""
-    today = date.today().strftime("%A, %B %d, %Y")
+    today = (today or date.today()).strftime("%A, %B %d, %Y")
     return (
         f"{job_prompt.strip()}\n\nToday is {today}.\n"
         f"{VOICE_RULES}\n{DIFFICULT_CALLER_RULES}"

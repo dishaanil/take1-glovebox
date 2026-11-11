@@ -2306,6 +2306,7 @@ dependencies = [
     { name = "livekit-agents" },
     { name = "livekit-plugins-ai-coustics" },
     { name = "python-dotenv" },
+    { name = "pyyaml" },
 ]
 
 [package.dev-dependencies]
@@ -2320,6 +2321,7 @@ requires-dist = [
     { name = "livekit-agents", specifier = "~=1.8" },
     { name = "livekit-plugins-ai-coustics", specifier = "~=0.3" },
     { name = "python-dotenv" },
+    { name = "pyyaml", specifier = ">=6" },
 ]
 
 [package.metadata.requires-dev]
